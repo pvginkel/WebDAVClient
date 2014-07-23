@@ -23,19 +23,18 @@ using System.Security.Cryptography.X509Certificates;
 
 namespace net.kvdb.webdav
 {
-    public delegate void ListCompleteDel(List<String> files, int statusCode);
-    public delegate void UploadCompleteDel(int statusCode, object state);
-    public delegate void DownloadCompleteDel(int statusCode);
-    public delegate void CreateDirCompleteDel(int statusCode);
-    public delegate void DeleteCompleteDel(int statusCode);
+    public delegate void ListCompleteCallback(List<String> files, int statusCode, object state);
+    public delegate void DownloadCompleteCallback(string content, int statusCode, object state);
+    public delegate void RequestCompleteCallback(int statusCode, object state);
 
     public class WebDAVClient
     {
-        public event ListCompleteDel ListComplete;
-        public event UploadCompleteDel UploadComplete;
-        public event DownloadCompleteDel DownloadComplete;
-        public event CreateDirCompleteDel CreateDirComplete;
-        public event DeleteCompleteDel DeleteComplete;
+        public event ListCompleteCallback ListComplete;
+        public event DownloadCompleteCallback DownloadAsStringComplete;
+        public event RequestCompleteCallback UploadComplete;
+        public event RequestCompleteCallback DownloadComplete;
+        public event RequestCompleteCallback CreateDirComplete;
+        public event RequestCompleteCallback DeleteComplete;
 
         //XXX: submit along with state object.
         HttpWebRequest httpWebRequest;
@@ -101,6 +100,13 @@ namespace net.kvdb.webdav
             set { domain = value; }
         }
 
+        private Encoding downloadAsStringEncoding = Encoding.UTF8;
+        public Encoding DownloadAsStringEncoding
+        {
+            get { return downloadAsStringEncoding; }
+            set { downloadAsStringEncoding = value; }
+        }
+
         Uri getServerUrl(String path, Boolean appendTrailingSlash)
         {
             String completePath = basePath;
@@ -137,6 +143,11 @@ namespace net.kvdb.webdav
         /// <param name="path"></param>
         public void List(String path)
         {
+            List(path, 1, null);
+        }
+
+        public void List(String path, object state)
+        {
             // Set default depth to 1. This would prevent recursion.
             List(path, 1);
         }
@@ -148,6 +159,11 @@ namespace net.kvdb.webdav
         /// <param name="depth">Recursion depth</param>
         /// <returns>A list of files (entries without a trailing slash) and directories (entries with a trailing slash)</returns>
         public void List(String remoteFilePath, int? depth)
+        {
+            List(remoteFilePath, depth, null);
+        }
+
+        public void List(String remoteFilePath, int? depth, object state)
         {
             // Uri should end with a trailing slash
             Uri listUri = getServerUrl(remoteFilePath, true);
@@ -167,13 +183,24 @@ namespace net.kvdb.webdav
             }
 
             AsyncCallback callback = new AsyncCallback(FinishList);
-            HTTPRequest(listUri, "PROPFIND", headers, Encoding.UTF8.GetBytes(propfind.ToString()), null, callback, remoteFilePath);
+            HTTPRequest(listUri, "PROPFIND", headers, Encoding.UTF8.GetBytes(propfind.ToString()), null, callback, new ListState(remoteFilePath, state));
         }
 
+        private class ListState
+        {
+            public string RemoteFilePath { get; private set; }
+            public object State { get; private set; }
+
+            public ListState(string remoteFilePath, object state)
+            {
+                RemoteFilePath = remoteFilePath;
+                State = state;
+            }
+        }
 
         void FinishList(IAsyncResult result)
         {
-            string remoteFilePath = (string)result.AsyncState;
+            var state = (ListState)result.AsyncState;
             int statusCode = 0;
             List<String> files = new List<string>();
 
@@ -195,7 +222,7 @@ namespace net.kvdb.webdav
                         if (file.Length > 0)
                         {
                             // Want to see directory contents, not the directory itself.
-                            if (file[file.Length-1] == remoteFilePath || file[file.Length-1] == server) { continue; }
+                            if (file[file.Length-1] == state.RemoteFilePath || file[file.Length-1] == server) { continue; }
                             files.Add(file[file.Length-1]);
                         }
                     }
@@ -204,7 +231,7 @@ namespace net.kvdb.webdav
 
             if (ListComplete != null)
             {
-                ListComplete(files, statusCode);
+                ListComplete(files, statusCode, state.State);
             }
         }
 
@@ -236,6 +263,32 @@ namespace net.kvdb.webdav
             HTTPRequest(uploadUri, method, null, null, localFilePath, callback, state);
         }
 
+        /// <summary>
+        /// Upload a file to the server
+        /// </summary>
+        /// <param name="localFilePath">Local path and filename of the file to upload</param>
+        /// <param name="remoteFilePath">Destination path and filename of the file on the server</param>
+        public void UploadString(String content, String remoteFilePath)
+        {
+            UploadString(content, remoteFilePath, null);
+        }
+
+        /// <summary>
+        /// Upload a file to the server
+        /// </summary>
+        /// <param name="localFilePath">Local path and filename of the file to upload</param>
+        /// <param name="remoteFilePath">Destination path and filename of the file on the server</param>
+        /// <param name="state">Object to pass along with the callback</param>
+        public void UploadString(String content, String remoteFilePath, object state)
+        {
+            Uri uploadUri = getServerUrl(remoteFilePath, false);
+            string method = WebRequestMethods.Http.Put.ToString();
+
+            AsyncCallback callback = new AsyncCallback(FinishUpload);
+            byte[] bytes = downloadAsStringEncoding.GetBytes(content);
+            HTTPRequest(uploadUri, method, null, bytes, null, "application/octet-stream", callback, state);
+        }
+
 
         void FinishUpload(IAsyncResult result)
         {
@@ -260,18 +313,22 @@ namespace net.kvdb.webdav
         /// <param name="localFilePath">Destination path and filename of the file to download on the local filesystem</param>
         public void Download(String remoteFilePath, String localFilePath)
         {
+            Download(remoteFilePath, localFilePath, null);
+        }
+
+        public void Download(String remoteFilePath, String localFilePath, object state)
+        {
             // Should not have a trailing slash.
             Uri downloadUri = getServerUrl(remoteFilePath, false);
             string method = WebRequestMethods.Http.Get.ToString();
 
             AsyncCallback callback = new AsyncCallback(FinishDownload);
-            HTTPRequest(downloadUri, method, null, null, null, callback, localFilePath);
+            HTTPRequest(downloadUri, method, null, null, null, callback, new DownloadState(localFilePath, state));
         }
-
 
         void FinishDownload(IAsyncResult result)
         {
-            string localFilePath = (string)result.AsyncState;
+            var state = (DownloadState)result.AsyncState;
             int statusCode = 0;
 
             using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
@@ -280,7 +337,7 @@ namespace net.kvdb.webdav
                 int contentLength = int.Parse(response.GetResponseHeader("Content-Length"));
                 using (Stream s = response.GetResponseStream())
                 {
-                    using (FileStream fs = new FileStream(localFilePath, FileMode.Create, FileAccess.Write))
+                    using (FileStream fs = new FileStream(state.LocalFilePath, FileMode.Create, FileAccess.Write))
                     {
                         byte[] content = new byte[4096];
                         int bytesRead = 0;
@@ -295,7 +352,71 @@ namespace net.kvdb.webdav
 
             if (DownloadComplete != null)
             {
-                DownloadComplete(statusCode);
+                DownloadComplete(statusCode, state.State);
+            }
+        }
+
+
+        /// <summary>
+        /// Download a file from the server
+        /// </summary>
+        /// <param name="remoteFilePath">Source path and filename of the file on the server</param>
+        public void DownloadAsString(String remoteFilePath)
+        {
+            DownloadAsString(remoteFilePath, null);
+        }
+
+        public void DownloadAsString(String remoteFilePath, object state)
+        {
+            // Should not have a trailing slash.
+            Uri downloadUri = getServerUrl(remoteFilePath, false);
+            string method = WebRequestMethods.Http.Get.ToString();
+
+            AsyncCallback callback = new AsyncCallback(FinishDownloadAsString);
+            HTTPRequest(downloadUri, method, null, null, null, callback, state);
+        }
+
+        private class DownloadState
+        {
+            public string LocalFilePath { get; private set; }
+            public object State { get; private set; }
+
+            public DownloadState(string localFilePath, object state)
+            {
+                LocalFilePath = localFilePath;
+                State = state;
+            }
+        }
+
+        void FinishDownloadAsString(IAsyncResult result)
+        {
+            int statusCode = 0;
+            string str;
+
+            using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
+            {
+                statusCode = (int)response.StatusCode;
+                int contentLength = int.Parse(response.GetResponseHeader("Content-Length"));
+                using (Stream s = response.GetResponseStream())
+                {
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        byte[] content = new byte[4096];
+                        int bytesRead = 0;
+                        do
+                        {
+                            bytesRead = s.Read(content, 0, content.Length);
+                            ms.Write(content, 0, bytesRead);
+                        } while (bytesRead > 0);
+
+                        str = downloadAsStringEncoding.GetString(ms.ToArray());
+                    }
+                }
+            }
+
+            if (DownloadAsStringComplete != null)
+            {
+                DownloadAsStringComplete(str, statusCode, result.AsyncState);
             }
         }
 
@@ -306,13 +427,18 @@ namespace net.kvdb.webdav
         /// <param name="remotePath">Destination path of the directory on the server</param>
         public void CreateDir(string remotePath)
         {
+            CreateDir(remotePath, null);
+        }
+
+        public void CreateDir(string remotePath, object state)
+        {
             // Should not have a trailing slash.
             Uri dirUri = getServerUrl(remotePath, false);
 
             string method = WebRequestMethods.Http.MkCol.ToString();
 
             AsyncCallback callback = new AsyncCallback(FinishCreateDir);
-            HTTPRequest(dirUri, method, null, null, null, callback, null);
+            HTTPRequest(dirUri, method, null, null, null, callback, state);
         }
 
 
@@ -327,7 +453,7 @@ namespace net.kvdb.webdav
 
             if (CreateDirComplete != null)
             {
-                CreateDirComplete(statusCode);
+                CreateDirComplete(statusCode, result.AsyncState);
             }
         }
 
@@ -338,10 +464,15 @@ namespace net.kvdb.webdav
         /// <param name="remoteFilePath"></param>
         public void Delete(string remoteFilePath)
         {
+            Delete(remoteFilePath, null);
+        }
+
+        public void Delete(string remoteFilePath, object state)
+        {
             Uri delUri = getServerUrl(remoteFilePath, remoteFilePath.EndsWith("/"));
 
             AsyncCallback callback = new AsyncCallback(FinishDelete);
-            HTTPRequest(delUri, "DELETE", null, null, null, callback, null);
+            HTTPRequest(delUri, "DELETE", null, null, null, callback, state);
         }
 
 
@@ -356,7 +487,7 @@ namespace net.kvdb.webdav
 
             if (DeleteComplete != null)
             {
-                DeleteComplete(statusCode);
+                DeleteComplete(statusCode, result.AsyncState);
             }
         }
         #endregion
@@ -388,7 +519,22 @@ namespace net.kvdb.webdav
         /// <param name="uploadFilePath"></param>
         /// <param name="callback"></param>
         /// <param name="state"></param>
-        void HTTPRequest(Uri uri, string requestMethod, IDictionary<string, string> headers, byte[] content, string uploadFilePath, AsyncCallback callback, object state)
+        private void HTTPRequest(Uri uri, string requestMethod, IDictionary<string, string> headers, byte[] content, string uploadFilePath, AsyncCallback callback, object state)
+        {
+            HTTPRequest(uri, requestMethod, headers, content, uploadFilePath, null, callback, state);
+        }
+
+        /// <summary>
+        /// Perform the WebDAV call and fire the callback when finished.
+        /// </summary>
+        /// <param name="uri"></param>
+        /// <param name="requestMethod"></param>
+        /// <param name="headers"></param>
+        /// <param name="content"></param>
+        /// <param name="uploadFilePath"></param>
+        /// <param name="callback"></param>
+        /// <param name="state"></param>
+        void HTTPRequest(Uri uri, string requestMethod, IDictionary<string, string> headers, byte[] content, string uploadFilePath, string contentEncoding, AsyncCallback callback, object state)
         {
             httpWebRequest = (HttpWebRequest)HttpWebRequest.Create(uri);
 			
@@ -448,7 +594,7 @@ namespace net.kvdb.webdav
                     // The request either contains actual content...
                     httpWebRequest.ContentLength = content.Length;
                     asyncState.content = content;
-                    httpWebRequest.ContentType = "text/xml";
+                    httpWebRequest.ContentType = contentEncoding ?? "text/xml";
                 }
                 else
                 {
