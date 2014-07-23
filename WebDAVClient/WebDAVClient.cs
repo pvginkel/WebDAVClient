@@ -37,7 +37,7 @@ namespace net.kvdb.webdav
         public event RequestCompleteCallback DeleteComplete;
 
         //XXX: submit along with state object.
-        HttpWebRequest httpWebRequest;
+        //HttpWebRequest httpWebRequest;
 
         #region WebDAV connection parameters
         private String server;
@@ -198,35 +198,55 @@ namespace net.kvdb.webdav
             }
         }
 
+        private class ResponseState
+        {
+            public HttpWebRequest Request { get; private set; }
+            public object State { get; private set; }
+
+            public ResponseState(HttpWebRequest request, object state)
+            {
+                Request = request;
+                State = state;
+            }
+        }
+
         void FinishList(IAsyncResult result)
         {
-            var state = (ListState)result.AsyncState;
+            var responseState = (ResponseState)result.AsyncState;
+            var state = (ListState)responseState.State;
             int statusCode = 0;
             List<String> files = new List<string>();
 
-            using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
+            try
             {
-                statusCode = (int)response.StatusCode;
-                using (Stream stream = response.GetResponseStream())
+                using (HttpWebResponse response = (HttpWebResponse)responseState.Request.EndGetResponse(result))
                 {
-                    XmlDocument xml = new XmlDocument();
-                    xml.Load(stream);
-                    XmlNamespaceManager xmlNsManager = new XmlNamespaceManager(xml.NameTable);
-                    xmlNsManager.AddNamespace("d", "DAV:");
-
-                    foreach (XmlNode node in xml.DocumentElement.ChildNodes)
+                    statusCode = (int)response.StatusCode;
+                    using (Stream stream = response.GetResponseStream())
                     {
-                        XmlNode xmlNode = node.SelectSingleNode("d:href", xmlNsManager);
-                        string filepath = Uri.UnescapeDataString(xmlNode.InnerXml);
-                        string[] file = filepath.Split(new string[1] { basePath }, 2, StringSplitOptions.RemoveEmptyEntries);
-                        if (file.Length > 0)
+                        XmlDocument xml = new XmlDocument();
+                        xml.Load(stream);
+                        XmlNamespaceManager xmlNsManager = new XmlNamespaceManager(xml.NameTable);
+                        xmlNsManager.AddNamespace("d", "DAV:");
+
+                        foreach (XmlNode node in xml.DocumentElement.ChildNodes)
                         {
-                            // Want to see directory contents, not the directory itself.
-                            if (file[file.Length-1] == state.RemoteFilePath || file[file.Length-1] == server) { continue; }
-                            files.Add(file[file.Length-1]);
+                            XmlNode xmlNode = node.SelectSingleNode("d:href", xmlNsManager);
+                            string filepath = Uri.UnescapeDataString(xmlNode.InnerXml);
+                            string[] file = filepath.Split(new string[1] { basePath }, 2, StringSplitOptions.RemoveEmptyEntries);
+                            if (file.Length > 0)
+                            {
+                                // Want to see directory contents, not the directory itself.
+                                if (file[file.Length - 1] == state.RemoteFilePath || file[file.Length - 1] == server) { continue; }
+                                files.Add(file[file.Length - 1]);
+                            }
                         }
                     }
                 }
+            }
+            catch (WebException ex)
+            {
+                statusCode = (int)((HttpWebResponse)ex.Response).StatusCode;
             }
 
             if (ListComplete != null)
@@ -292,16 +312,17 @@ namespace net.kvdb.webdav
 
         void FinishUpload(IAsyncResult result)
         {
+            var responseState = (ResponseState)result.AsyncState;
             int statusCode = 0;
 
-            using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
+            using (HttpWebResponse response = (HttpWebResponse)responseState.Request.EndGetResponse(result))
             {
                 statusCode = (int)response.StatusCode;
             }
 
             if (UploadComplete != null)
             {
-                UploadComplete(statusCode, result.AsyncState);
+                UploadComplete(statusCode, responseState.State);
             }
         }
 
@@ -328,10 +349,11 @@ namespace net.kvdb.webdav
 
         void FinishDownload(IAsyncResult result)
         {
-            var state = (DownloadState)result.AsyncState;
+            var responseState = (ResponseState)result.AsyncState;
+            var state = (DownloadState)responseState.State;
             int statusCode = 0;
 
-            using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
+            using (HttpWebResponse response = (HttpWebResponse)responseState.Request.EndGetResponse(result))
             {
                 statusCode = (int)response.StatusCode;
                 int contentLength = int.Parse(response.GetResponseHeader("Content-Length"));
@@ -390,10 +412,11 @@ namespace net.kvdb.webdav
 
         void FinishDownloadAsString(IAsyncResult result)
         {
+            var responseState = (ResponseState)result.AsyncState;
             int statusCode = 0;
             string str;
 
-            using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
+            using (HttpWebResponse response = (HttpWebResponse)responseState.Request.EndGetResponse(result))
             {
                 statusCode = (int)response.StatusCode;
                 int contentLength = int.Parse(response.GetResponseHeader("Content-Length"));
@@ -416,7 +439,7 @@ namespace net.kvdb.webdav
 
             if (DownloadAsStringComplete != null)
             {
-                DownloadAsStringComplete(str, statusCode, result.AsyncState);
+                DownloadAsStringComplete(str, statusCode, responseState.State);
             }
         }
 
@@ -444,16 +467,17 @@ namespace net.kvdb.webdav
 
         void FinishCreateDir(IAsyncResult result)
         {
+            var responseState = (ResponseState)result.AsyncState;
             int statusCode = 0;
 
-            using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
+            using (HttpWebResponse response = (HttpWebResponse)responseState.Request.EndGetResponse(result))
             {
                 statusCode = (int)response.StatusCode;
             }
 
             if (CreateDirComplete != null)
             {
-                CreateDirComplete(statusCode, result.AsyncState);
+                CreateDirComplete(statusCode, responseState.State);
             }
         }
 
@@ -478,16 +502,17 @@ namespace net.kvdb.webdav
 
         void FinishDelete(IAsyncResult result)
         {
+            var responseState = (ResponseState)result.AsyncState;
             int statusCode = 0;
 
-            using (HttpWebResponse response = (HttpWebResponse)httpWebRequest.EndGetResponse(result))
+            using (HttpWebResponse response = (HttpWebResponse)responseState.Request.EndGetResponse(result))
             {
                 statusCode = (int)response.StatusCode;
             }
 
             if (DeleteComplete != null)
             {
-                DeleteComplete(statusCode, result.AsyncState);
+                DeleteComplete(statusCode, responseState.State);
             }
         }
         #endregion
@@ -536,7 +561,7 @@ namespace net.kvdb.webdav
         /// <param name="state"></param>
         void HTTPRequest(Uri uri, string requestMethod, IDictionary<string, string> headers, byte[] content, string uploadFilePath, string contentEncoding, AsyncCallback callback, object state)
         {
-            httpWebRequest = (HttpWebRequest)HttpWebRequest.Create(uri);
+            var httpWebRequest = (HttpWebRequest)HttpWebRequest.Create(uri);
 			
             /*
              * The following line fixes an authentication problem explained here:
@@ -580,6 +605,8 @@ namespace net.kvdb.webdav
                     httpWebRequest.Headers.Set(key, headers[key]);
                 }
             }
+
+            state = new ResponseState(httpWebRequest, state);
 
             // Need to send along content?
             if (content != null || uploadFilePath != null)
